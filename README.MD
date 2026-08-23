@@ -46,7 +46,7 @@ Go HTTP API ──► SQLite WAL 状态快照
 适用于 Debian/Ubuntu、CentOS/RHEL、Alpine 等常见 Linux 系统。脚本会自动检查并安装 Docker，创建独立安装目录，拉取最新镜像并启动服务：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/wang4386/CDT-Monitor/main/install.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/JudiLite/CDT-Monitor/main/install.sh | sudo bash
 ```
 
 默认访问地址为 `http://服务器IP:43210`。首次访问会进入安全安装向导。
@@ -55,7 +55,7 @@ curl -fsSL https://raw.githubusercontent.com/wang4386/CDT-Monitor/main/install.s
 
 ```bash
 # 自定义端口、Worker 数量和时区
-curl -fsSL https://raw.githubusercontent.com/wang4386/CDT-Monitor/main/install.sh | sudo bash -s -- --port 8080 --workers 2 --timezone Asia/Shanghai
+curl -fsSL https://raw.githubusercontent.com/JudiLite/CDT-Monitor/main/install.sh | sudo bash -s -- --port 8080 --workers 2 --timezone Asia/Shanghai
 
 # 不自动安装 Docker
 sudo bash install.sh --no-install-docker
@@ -79,7 +79,7 @@ docker compose down
 ```yaml
 services:
   cdt-monitor:
-    image: ghcr.io/wang4386/cdt-monitor:latest
+    image: ghcr.io/JudiLite/cdt-monitor:latest
     container_name: cdt-monitor
     restart: unless-stopped
     init: true
@@ -225,7 +225,7 @@ GET /monitor.php?key=<具有 cron:run scope 的 API Key>
 
 ## 相关链接
 
-- 项目主页：[GitHub](https://github.com/wang4386/CDT-Monitor)
+- 项目主页：[GitHub](https://github.com/JudiLite/CDT-Monitor)
 - 作者博客：[qninq.cn](https://qninq.cn)
 - 技术社区：[NodeSeek](https://www.nodeseek.com/) · [Linux.do](https://linux.do/)
 
