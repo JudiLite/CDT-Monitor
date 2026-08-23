@@ -17,6 +17,8 @@ export type Config = {
   admin_password?: string
   traffic_threshold: number
   enable_schedule_notification: boolean
+  enable_daily_report: boolean
+  daily_report_time: string
   shutdown_mode: 'KeepCharging' | 'StopCharging'
   threshold_action: 'stop_and_notify' | 'notify_only'
   keep_alive: boolean
@@ -77,6 +79,8 @@ export const emptyAccount = (): Account => ({
 export const defaultConfig = (): Config => ({
   traffic_threshold: 95,
   enable_schedule_notification: false,
+  enable_daily_report: true,
+  daily_report_time: '23:59',
   shutdown_mode: 'KeepCharging',
   threshold_action: 'stop_and_notify',
   keep_alive: false,

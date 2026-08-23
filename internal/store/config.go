@@ -85,6 +85,8 @@ func (s *Store) GetConfig(ctx context.Context) (domain.Config, error) {
 	config := domain.Config{
 		TrafficThreshold:   intSetting(settings, "traffic_threshold", 95),
 		EnableScheduleMail: boolSetting(settings, "enable_schedule_email", false),
+		EnableDailyReport:  boolSetting(settings, "enable_daily_report", true),
+		DailyReportTime:    valueOr(settings, "daily_report_time", "23:59"),
 		ShutdownMode:       valueOr(settings, "shutdown_mode", "KeepCharging"),
 		ThresholdAction:    valueOr(settings, "threshold_action", "stop_and_notify"),
 		KeepAlive:          boolSetting(settings, "keep_alive", false),
@@ -176,6 +178,12 @@ func (s *Store) saveConfig(ctx context.Context, config domain.Config, setup bool
 	if config.APIInterval < minAPIIntervalSeconds || config.APIInterval > 86400 {
 		return errors.New("api interval must be between 30 and 86400 seconds")
 	}
+	if config.DailyReportTime == "" {
+		config.DailyReportTime = "23:59"
+	}
+	if _, err := time.Parse("15:04", config.DailyReportTime); err != nil {
+		return errors.New("daily report time must use HH:MM format")
+	}
 	if config.Timezone == "" {
 		config.Timezone = "Asia/Shanghai"
 	}
@@ -199,6 +207,8 @@ func (s *Store) saveConfig(ctx context.Context, config domain.Config, setup bool
 		values := map[string]string{
 			"traffic_threshold":      strconv.Itoa(config.TrafficThreshold),
 			"enable_schedule_email":  strconv.FormatBool(config.EnableScheduleMail),
+			"enable_daily_report":    strconv.FormatBool(config.EnableDailyReport),
+			"daily_report_time":      config.DailyReportTime,
 			"shutdown_mode":          config.ShutdownMode,
 			"threshold_action":       config.ThresholdAction,
 			"keep_alive":             strconv.FormatBool(config.KeepAlive),

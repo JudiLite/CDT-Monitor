@@ -38,6 +38,8 @@ type Engine struct {
 	workers      int
 	started      sync.Once
 	accountLocks sync.Map
+	telegramMu   sync.Mutex
+	telegramNext int64
 }
 
 var ErrMonitorBusy = errors.New("monitor scheduler lease is held by another process")
@@ -57,6 +59,7 @@ func (e *Engine) Start(ctx context.Context) {
 			go e.worker(ctx, index)
 		}
 		go e.notificationWorker(ctx)
+		go e.telegramBotWorker(ctx)
 	})
 }
 
@@ -107,6 +110,9 @@ func (e *Engine) scheduler(ctx context.Context) {
 		case now := <-ticker.C:
 			if err := e.RunOnce(ctx); err != nil && !errors.Is(err, ErrMonitorBusy) {
 				e.logger.Warn("scheduler cycle skipped", "error", err)
+			}
+			if err := e.enqueueDailyReportIfDue(ctx, now); err != nil {
+				e.logger.Warn("daily report skipped", "error", err)
 			}
 			if now.Minute()%30 == 0 && now.Second() < 15 {
 				_ = e.store.Prune(ctx)
@@ -500,6 +506,168 @@ func (e *Engine) notificationWorker(ctx context.Context) {
 	}
 }
 
+func (e *Engine) enqueueDailyReportIfDue(ctx context.Context, tick time.Time) error {
+	config, err := e.store.GetConfig(ctx)
+	if err != nil {
+		return err
+	}
+	if !config.EnableDailyReport {
+		return nil
+	}
+	location, err := time.LoadLocation(config.Timezone)
+	if err != nil {
+		location = time.FixedZone("CST", 8*3600)
+	}
+	now := tick.In(location)
+	if !dueWithin(now, config.DailyReportTime, 10*time.Minute) {
+		return nil
+	}
+	key := "daily_report:" + now.Format("20060102")
+	fresh, err := e.store.RecordActionEvent(ctx, key, 0, "daily_report", "queued", "")
+	if err != nil || !fresh {
+		return err
+	}
+	event, err := e.dailyReportEvent(ctx, config, now)
+	if err != nil {
+		_ = e.store.DeleteActionEvent(ctx, key)
+		return err
+	}
+	if err = e.store.AddOutbox(ctx, event, notify.EnabledChannels(config)); err != nil {
+		_ = e.store.DeleteActionEvent(ctx, key)
+		return err
+	}
+	_ = e.store.AddLog(ctx, "info", "每日流量报告已生成")
+	return nil
+}
+
+func (e *Engine) dailyReportEvent(ctx context.Context, config domain.Config, now time.Time) (domain.NotificationEvent, error) {
+	summaries, lastRun, err := e.Summary(ctx)
+	if err != nil {
+		return domain.NotificationEvent{}, err
+	}
+	fields := make(map[string]string, len(summaries)+4)
+	totalUsed, totalLimit, totalToday := 0.0, 0.0, 0.0
+	dayStart := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+	for _, account := range summaries {
+		previous, ok, err := e.store.PreviousDailyTraffic(ctx, account.ID, dayStart)
+		if err != nil {
+			return domain.NotificationEvent{}, err
+		}
+		today := 0.0
+		if ok && account.FlowUsed >= previous {
+			today = account.FlowUsed - previous
+		}
+		totalUsed += account.FlowUsed
+		totalLimit += account.FlowTotal
+		totalToday += today
+		name := firstNonEmptyText(account.Remark, account.Account, strconv.FormatInt(account.ID, 10))
+		fields[name] = fmt.Sprintf("今日 +%.2f GB / 累计 %.2f GB / 额度 %.2f GB / %.2f%% / %s", today, account.FlowUsed, account.FlowTotal, account.Percentage, account.InstanceStatus)
+	}
+	percent := usagePercent(totalUsed, totalLimit)
+	fields["今日总增量"] = fmt.Sprintf("%.2f GB", totalToday)
+	fields["累计总流量"] = fmt.Sprintf("%.2f GB / %.2f GB (%.2f%%)", totalUsed, totalLimit, percent)
+	if !lastRun.IsZero() {
+		fields["最近同步"] = lastRun.In(now.Location()).Format("2006-01-02 15:04:05")
+	}
+	title := "每日流量报告"
+	summary := fmt.Sprintf("%s CDT 流量日报：今日 +%.2f GB，累计 %.2f / %.2f GB。", now.Format("2006-01-02"), totalToday, totalUsed, totalLimit)
+	return newEvent("daily_report", title, summary, 0, fields), nil
+}
+
+func (e *Engine) dailyReportText(ctx context.Context, config domain.Config, now time.Time) (string, error) {
+	event, err := e.dailyReportEvent(ctx, config, now)
+	if err != nil {
+		return "", err
+	}
+	var builder strings.Builder
+	builder.WriteString("[CDT Monitor] ")
+	builder.WriteString(event.Title)
+	builder.WriteByte('\n')
+	builder.WriteString(event.Summary)
+	for key, value := range event.Fields {
+		builder.WriteByte('\n')
+		builder.WriteString(key)
+		builder.WriteString(": ")
+		builder.WriteString(value)
+	}
+	return builder.String(), nil
+}
+
+func (e *Engine) telegramBotWorker(ctx context.Context) {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+	for {
+		if err := e.pollTelegramBot(ctx); err != nil && !errors.Is(err, context.Canceled) {
+			e.logger.Warn("telegram bot polling skipped", "error", err)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+func (e *Engine) pollTelegramBot(ctx context.Context) error {
+	config, err := e.store.GetConfig(ctx)
+	if err != nil {
+		return err
+	}
+	tg := config.Notifications.Telegram
+	if !tg.Enabled || tg.Token == "" || tg.ChatID == "" {
+		return nil
+	}
+	acquired, err := e.store.AcquireLease(ctx, "telegram_bot", e.owner, 45*time.Second)
+	if err != nil || !acquired {
+		return err
+	}
+	e.telegramMu.Lock()
+	offset := e.telegramNext
+	e.telegramMu.Unlock()
+	pollCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	updates, err := e.notify.PollTelegramUpdates(pollCtx, tg, offset)
+	cancel()
+	if err != nil {
+		return err
+	}
+	for _, update := range updates {
+		if update.UpdateID >= offset {
+			offset = update.UpdateID + 1
+		}
+		if update.ChatID != tg.ChatID {
+			continue
+		}
+		parts := strings.Fields(update.Text)
+		if len(parts) == 0 {
+			continue
+		}
+		command := strings.ToLower(parts[0])
+		if at := strings.Index(command, "@"); at >= 0 {
+			command = command[:at]
+		}
+		switch command {
+		case "/report", "/daily", "/today":
+			location, locErr := time.LoadLocation(config.Timezone)
+			if locErr != nil {
+				location = time.FixedZone("CST", 8*3600)
+			}
+			text, reportErr := e.dailyReportText(ctx, config, time.Now().In(location))
+			if reportErr != nil {
+				text = "生成每日流量报告失败：" + reportErr.Error()
+			}
+			_ = e.notify.SendTelegramText(ctx, tg, update.ChatID, text)
+		case "/start", "/help":
+			_ = e.notify.SendTelegramText(ctx, tg, update.ChatID, "CDT Monitor Bot 可用命令：\n/report 获取今日流量报告\n/daily 获取今日流量报告\n/today 获取今日流量报告")
+		}
+	}
+	e.telegramMu.Lock()
+	if offset > e.telegramNext {
+		e.telegramNext = offset
+	}
+	e.telegramMu.Unlock()
+	return nil
+}
+
 func (e *Engine) signal() {
 	select {
 	case e.wake <- struct{}{}:
@@ -543,6 +711,15 @@ func masked(accessKeyID string) string {
 		return accessKeyID + "***"
 	}
 	return accessKeyID[:7] + "***"
+}
+
+func firstNonEmptyText(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return "CDT"
 }
 
 func newEvent(eventType, title, summary string, accountID int64, fields map[string]string) domain.NotificationEvent {

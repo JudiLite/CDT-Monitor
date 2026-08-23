@@ -116,6 +116,18 @@ func (s *Store) History(ctx context.Context, accountID int64) (domain.History, e
 	return history, nil
 }
 
+func (s *Store) PreviousDailyTraffic(ctx context.Context, accountID int64, before time.Time) (float64, bool, error) {
+	var traffic float64
+	err := s.db.QueryRowContext(ctx, `SELECT traffic FROM traffic_daily WHERE account_id=? AND recorded_at<? ORDER BY recorded_at DESC LIMIT 1`, accountID, before.Unix()).Scan(&traffic)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, err
+	}
+	return traffic, true, nil
+}
+
 func (s *Store) LastMonitorRun(ctx context.Context) (time.Time, error) {
 	var value string
 	err := s.db.QueryRowContext(ctx, `SELECT value FROM settings WHERE key='last_monitor_run'`).Scan(&value)

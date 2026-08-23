@@ -81,6 +81,8 @@ type Config struct {
 	AdminPassword      string             `json:"admin_password,omitempty"`
 	TrafficThreshold   int                `json:"traffic_threshold"`
 	EnableScheduleMail bool               `json:"enable_schedule_notification"`
+	EnableDailyReport  bool               `json:"enable_daily_report"`
+	DailyReportTime    string             `json:"daily_report_time"`
 	ShutdownMode       string             `json:"shutdown_mode"`
 	ThresholdAction    string             `json:"threshold_action"`
 	KeepAlive          bool               `json:"keep_alive"`

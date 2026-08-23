@@ -15,6 +15,7 @@ CDT Monitor 是一个用于阿里云 CDT 流量监控、ECS 实例自动化控�
 - 抢占式实例保活，阈值熔断优先于保活。
 - Web 控制台手动开机、关机和刷新。
 - SMTP、Telegram Bot、自定义 Webhook 通知；Telegram 支持自定义反代和 SOCKS5。
+- 每日流量报告，默认每天 23:59 按系统时区推送；Telegram Bot 支持交互获取报告。
 - 中国站和国际站 BSS 端点、CNY/USD 账单与余额缓存。
 - 首次安装向导、管理员 Session、登录限速、CSRF 防护。
 - AES-GCM 加密 AccessKey Secret 与通知凭据，管理员密码使用 Argon2id。
@@ -244,6 +245,20 @@ GET /monitor.php?key=<具有 cron:run scope 的 API Key>
 ### Android 桌面小组件
 
 仓库中的 [`android-widget`](android-widget/README.md) 是基于 `/api/v1/widget/summary` 的 Android 小组件原型，源码暂时随主项目保存，供后续研究和完善。当前不作为正式稳定客户端发布。
+
+## 每日流量报告与 Telegram Bot
+
+系统设置中可以开启“每日流量报告”，默认在 `23:59` 按控制台时区生成报告，并通过已启用的通知通道发送。报告包含每个实例的今日增量、累计流量、额度、使用率和实例状态。
+
+启用 Telegram 通知并保存 Bot Token 与 Chat ID 后，可以在对应 Chat 中发送以下命令交互获取实时报告：
+
+```text
+/report
+/daily
+/today
+```
+
+Bot 只响应配置中的 Chat ID，其他会话的消息会被忽略。
 
 ## 相关链接
 

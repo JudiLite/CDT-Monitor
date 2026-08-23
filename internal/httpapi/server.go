@@ -920,6 +920,9 @@ func applyConfigDefaults(config *domain.Config) {
 	if config.APIInterval == 0 {
 		config.APIInterval = 600
 	}
+	if config.DailyReportTime == "" {
+		config.DailyReportTime = "23:59"
+	}
 	if config.Timezone == "" {
 		config.Timezone = "Asia/Shanghai"
 	}

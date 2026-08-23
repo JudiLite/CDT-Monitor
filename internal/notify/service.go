@@ -31,6 +31,12 @@ type Service struct {
 	httpClient *http.Client
 }
 
+type TelegramUpdate struct {
+	UpdateID int64
+	ChatID   string
+	Text     string
+}
+
 func New() *Service {
 	return &Service{httpClient: &http.Client{Timeout: 12 * time.Second}}
 }
@@ -140,26 +146,19 @@ func renderEmail(event domain.NotificationEvent) string {
 }
 
 func (s *Service) sendTelegram(ctx context.Context, config domain.TelegramConfig, event domain.NotificationEvent) error {
-	baseURL := "https://api.telegram.org"
-	if config.ProxyType == "custom" && config.ProxyURL != "" {
-		baseURL = strings.TrimRight(config.ProxyURL, "/")
+	return s.SendTelegramText(ctx, config, config.ChatID, eventText(event))
+}
+
+func (s *Service) SendTelegramText(ctx context.Context, config domain.TelegramConfig, chatID, text string) error {
+	if chatID == "" {
+		chatID = config.ChatID
+	}
+	baseURL, client, err := s.telegramEndpoint(config)
+	if err != nil {
+		return err
 	}
 	endpoint := baseURL + "/bot" + config.Token + "/sendMessage"
-	form := url.Values{"chat_id": {config.ChatID}, "text": {eventText(event)}}
-	client := s.httpClient
-	if config.ProxyType == "socks5" && config.ProxyIP != "" && config.ProxyPort != "" {
-		var auth *proxy.Auth
-		if config.ProxyUser != "" || config.ProxyPass != "" {
-			auth = &proxy.Auth{User: config.ProxyUser, Password: config.ProxyPass}
-		}
-		dialer, err := proxy.SOCKS5("tcp", net.JoinHostPort(config.ProxyIP, config.ProxyPort), auth, proxy.Direct)
-		if err != nil {
-			return err
-		}
-		client = &http.Client{Timeout: 12 * time.Second, Transport: &http.Transport{DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
-			return dialer.Dial(network, address)
-		}}}
-	}
+	form := url.Values{"chat_id": {chatID}, "text": {text}}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(form.Encode()))
 	if err != nil {
 		return err
@@ -175,6 +174,80 @@ func (s *Service) sendTelegram(ctx context.Context, config domain.TelegramConfig
 		return fmt.Errorf("telegram HTTP %d: %s", resp.StatusCode, string(body))
 	}
 	return nil
+}
+
+func (s *Service) PollTelegramUpdates(ctx context.Context, config domain.TelegramConfig, offset int64) ([]TelegramUpdate, error) {
+	baseURL, client, err := s.telegramEndpoint(config)
+	if err != nil {
+		return nil, err
+	}
+	endpoint := baseURL + "/bot" + config.Token + "/getUpdates"
+	form := url.Values{"timeout": {"25"}, "allowed_updates": {`["message"]`}}
+	if offset > 0 {
+		form.Set("offset", strconv.FormatInt(offset, 10))
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(form.Encode()))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("telegram HTTP %d: %s", resp.StatusCode, string(body))
+	}
+	var payload struct {
+		OK     bool `json:"ok"`
+		Result []struct {
+			UpdateID int64 `json:"update_id"`
+			Message  struct {
+				Text string `json:"text"`
+				Chat struct {
+					ID int64 `json:"id"`
+				} `json:"chat"`
+			} `json:"message"`
+		} `json:"result"`
+	}
+	if err = json.Unmarshal(body, &payload); err != nil {
+		return nil, err
+	}
+	if !payload.OK {
+		return nil, errors.New("telegram getUpdates returned ok=false")
+	}
+	updates := make([]TelegramUpdate, 0, len(payload.Result))
+	for _, item := range payload.Result {
+		if item.Message.Chat.ID == 0 || strings.TrimSpace(item.Message.Text) == "" {
+			continue
+		}
+		updates = append(updates, TelegramUpdate{UpdateID: item.UpdateID, ChatID: strconv.FormatInt(item.Message.Chat.ID, 10), Text: item.Message.Text})
+	}
+	return updates, nil
+}
+
+func (s *Service) telegramEndpoint(config domain.TelegramConfig) (string, *http.Client, error) {
+	baseURL := "https://api.telegram.org"
+	if config.ProxyType == "custom" && config.ProxyURL != "" {
+		baseURL = strings.TrimRight(config.ProxyURL, "/")
+	}
+	client := s.httpClient
+	if config.ProxyType == "socks5" && config.ProxyIP != "" && config.ProxyPort != "" {
+		var auth *proxy.Auth
+		if config.ProxyUser != "" || config.ProxyPass != "" {
+			auth = &proxy.Auth{User: config.ProxyUser, Password: config.ProxyPass}
+		}
+		dialer, err := proxy.SOCKS5("tcp", net.JoinHostPort(config.ProxyIP, config.ProxyPort), auth, proxy.Direct)
+		if err != nil {
+			return "", nil, err
+		}
+		client = &http.Client{Timeout: 12 * time.Second, Transport: &http.Transport{DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
+			return dialer.Dial(network, address)
+		}}}
+	}
+	return baseURL, client, nil
 }
 
 func (s *Service) sendWebhook(ctx context.Context, config domain.WebhookConfig, event domain.NotificationEvent) error {
