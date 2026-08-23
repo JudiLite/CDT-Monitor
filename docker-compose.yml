@@ -1,6 +1,6 @@
 services:
   cdt-monitor:
-    image: ghcr.io/wang4386/cdt-monitor:latest
+    image: ghcr.io/judilite/cdt-monitor:latest
     container_name: cdt-monitor
     restart: unless-stopped
     init: true

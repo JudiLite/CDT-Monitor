@@ -5,7 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 
-	"github.com/wang4386/CDT-Monitor/internal/security"
+	"github.com/JudiLite/CDT-Monitor/internal/security"
 )
 
 const schema = `

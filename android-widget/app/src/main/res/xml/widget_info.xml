@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <appwidget-provider xmlns:android="http://schemas.android.com/apk/res/android"
-    android:configure="com.wang4386.cdtmonitor.widget.WidgetConfigureActivity"
+    android:configure="com.judilite.cdtmonitor.widget.WidgetConfigureActivity"
     android:description="@string/widget_description"
     android:initialLayout="@layout/widget_instance"
     android:minHeight="110dp"

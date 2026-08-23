@@ -1,4 +1,4 @@
-package com.wang4386.cdtmonitor.widget;
+package com.judilite.cdtmonitor.widget;
 
 import android.app.AlarmManager;
 import android.app.PendingIntent;
@@ -20,7 +20,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 public final class CdtWidgetProvider extends AppWidgetProvider {
-    static final String ACTION_REFRESH = "com.wang4386.cdtmonitor.widget.ACTION_REFRESH";
+    static final String ACTION_REFRESH = "com.judilite.cdtmonitor.widget.ACTION_REFRESH";
     private static final long REFRESH_INTERVAL_MS = 30L * 60L * 1000L;
     private static final ExecutorService EXECUTOR = Executors.newSingleThreadExecutor();
 

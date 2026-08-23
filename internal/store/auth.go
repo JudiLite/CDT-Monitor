@@ -9,8 +9,8 @@ import (
 	"time"
 
 	"github.com/go-webauthn/webauthn/webauthn"
-	"github.com/wang4386/CDT-Monitor/internal/domain"
-	"github.com/wang4386/CDT-Monitor/internal/security"
+	"github.com/JudiLite/CDT-Monitor/internal/domain"
+	"github.com/JudiLite/CDT-Monitor/internal/security"
 )
 
 func (s *Store) VerifyAdminPassword(ctx context.Context, password string) (bool, error) {

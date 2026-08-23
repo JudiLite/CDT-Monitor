@@ -24,7 +24,7 @@ import (
 
 	"golang.org/x/net/proxy"
 
-	"github.com/wang4386/CDT-Monitor/internal/domain"
+	"github.com/JudiLite/CDT-Monitor/internal/domain"
 )
 
 type Service struct {

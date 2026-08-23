@@ -9,8 +9,8 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/wang4386/CDT-Monitor/internal/domain"
-	"github.com/wang4386/CDT-Monitor/internal/security"
+	"github.com/JudiLite/CDT-Monitor/internal/domain"
+	"github.com/JudiLite/CDT-Monitor/internal/security"
 )
 
 func (s *Store) AddLog(ctx context.Context, logType, message string) error {

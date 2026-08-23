@@ -33,7 +33,7 @@
             android:label="CDT Monitor 实例">
             <intent-filter>
                 <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
-                <action android:name="com.wang4386.cdtmonitor.widget.ACTION_REFRESH" />
+                <action android:name="com.judilite.cdtmonitor.widget.ACTION_REFRESH" />
             </intent-filter>
             <meta-data
                 android:name="android.appwidget.provider"

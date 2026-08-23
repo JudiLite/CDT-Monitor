@@ -9,8 +9,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/wang4386/CDT-Monitor/internal/domain"
-	"github.com/wang4386/CDT-Monitor/internal/security"
+	"github.com/JudiLite/CDT-Monitor/internal/domain"
+	"github.com/JudiLite/CDT-Monitor/internal/security"
 )
 
 const minAPIIntervalSeconds = 30

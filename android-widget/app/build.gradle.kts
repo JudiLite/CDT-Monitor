@@ -3,11 +3,11 @@ plugins {
 }
 
 android {
-    namespace = "com.wang4386.cdtmonitor.widget"
+    namespace = "com.judilite.cdtmonitor.widget"
     compileSdk = 35
 
     defaultConfig {
-        applicationId = "com.wang4386.cdtmonitor.widget"
+        applicationId = "com.judilite.cdtmonitor.widget"
         minSdk = 24
         targetSdk = 35
         versionCode = System.getenv("ANDROID_VERSION_CODE")?.toIntOrNull() ?: 2

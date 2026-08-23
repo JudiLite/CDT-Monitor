@@ -6,10 +6,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/wang4386/CDT-Monitor/internal/aliyun"
-	"github.com/wang4386/CDT-Monitor/internal/domain"
-	"github.com/wang4386/CDT-Monitor/internal/notify"
-	"github.com/wang4386/CDT-Monitor/internal/store"
+	"github.com/JudiLite/CDT-Monitor/internal/aliyun"
+	"github.com/JudiLite/CDT-Monitor/internal/domain"
+	"github.com/JudiLite/CDT-Monitor/internal/notify"
+	"github.com/JudiLite/CDT-Monitor/internal/store"
 )
 
 type billingTestProvider struct{}

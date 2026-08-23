@@ -1,4 +1,4 @@
-package com.wang4386.cdtmonitor.widget;
+package com.judilite.cdtmonitor.widget;
 
 import android.net.Uri;
 

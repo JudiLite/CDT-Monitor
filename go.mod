@@ -1,4 +1,4 @@
-module github.com/wang4386/CDT-Monitor
+module github.com/JudiLite/CDT-Monitor
 
 go 1.24.0
 

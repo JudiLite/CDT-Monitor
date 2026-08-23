@@ -61,16 +61,44 @@ curl -fsSL https://raw.githubusercontent.com/JudiLite/CDT-Monitor/main/install.s
 sudo bash install.sh --no-install-docker
 ```
 
-安装文件位于 `/opt/cdt-monitor`，数据默认保存于 `/opt/cdt-monitor/data`。管理命令：
+安装文件位于 `/opt/cdt-monitor`，数据默认保存于 `/opt/cdt-monitor/data`。安装完成后可以直接输入 `cdt` 呼出管理菜单：
 
 ```bash
-cd /opt/cdt-monitor
-docker compose logs -f
-docker compose restart
-docker compose down
+cdt
+```
+
+也可以直接使用子命令：
+
+```bash
+cdt status
+cdt logs
+cdt restart
+cdt update
+cdt uninstall
 ```
 
 > 建议从可信网络下载脚本后再执行；脚本只会安装 Docker、拉取官方镜像并创建 Compose 配置。
+
+## 一键卸载
+
+默认卸载会停止并删除容器、移除 `cdt` 管理命令和 Compose 配置，但保留数据目录：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/JudiLite/CDT-Monitor/main/uninstall.sh | sudo bash
+```
+
+如果确认不再需要数据，可以加 `--purge-data`：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/JudiLite/CDT-Monitor/main/uninstall.sh | sudo bash -s -- --purge-data
+```
+
+已部署的服务器上也可以直接使用：
+
+```bash
+cdt uninstall
+cdt uninstall --purge-data
+```
 
 ## Docker 安装
 
@@ -79,7 +107,7 @@ docker compose down
 ```yaml
 services:
   cdt-monitor:
-    image: ghcr.io/JudiLite/cdt-monitor:latest
+    image: ghcr.io/judilite/cdt-monitor:latest
     container_name: cdt-monitor
     restart: unless-stopped
     init: true
@@ -114,13 +142,7 @@ docker run -d \
   --restart unless-stopped \
   -p 43210:8080 \
   -v cdt-data:/data \
-  ghcr.io/wang4386/cdt-monitor:latest
-```
-
-Docker Hub 用户也可以使用：
-
-```text
-qninq/cdt-monitor:latest
+  ghcr.io/judilite/cdt-monitor:latest
 ```
 
 运行镜像使用非 root 用户和 `scratch` 基础层，不包含 Nginx、PHP-FPM、Cron、shell 或包管理器。HTTPS 请求所需的 CA 证书会单独复制进镜像。
@@ -263,9 +285,9 @@ CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o cdt-monitor ./cmd/cdt-monit
 
 镜像标签：
 
-- `dev` 分支：`ghcr.io/wang4386/cdt-monitor:dev`、`qninq/cdt-monitor:dev`
-- `main` 分支：`ghcr.io/wang4386/cdt-monitor:latest`、`qninq/cdt-monitor:latest`
-- Release：两个仓库均发布 `v2.x.x`、`2.x.x` 与 `2.x` 标签
+- `dev` 分支：`ghcr.io/judilite/cdt-monitor:dev`
+- `main` 分支：`ghcr.io/judilite/cdt-monitor:latest`
+- Release：发布 `v2.x.x`、`2.x.x` 与 `2.x` 标签
 
 ## 安全建议
 

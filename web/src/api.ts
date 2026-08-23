@@ -35,7 +35,7 @@ export async function fetchLatestReleaseFromGitHub() {
   const controller = new AbortController()
   const timeout = window.setTimeout(() => controller.abort(), 4_000)
   try {
-    const response = await fetch('https://api.github.com/repos/wang4386/CDT-Monitor/releases/latest', {
+    const response = await fetch('https://api.github.com/repos/JudiLite/CDT-Monitor/releases/latest', {
       headers: { Accept: 'application/vnd.github+json' },
       credentials: 'omit',
       cache: 'no-store',
