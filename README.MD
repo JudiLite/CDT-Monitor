@@ -41,6 +41,37 @@ Go HTTP API ──► SQLite WAL 状态快照
 
 更完整的现状与技术决策见 [架构分析](docs/architecture-analysis.md)。
 
+## 一键脚本部署
+
+适用于 Debian/Ubuntu、CentOS/RHEL、Alpine 等常见 Linux 系统。脚本会自动检查并安装 Docker，创建独立安装目录，拉取最新镜像并启动服务：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/wang4386/CDT-Monitor/main/install.sh | sudo bash
+```
+
+默认访问地址为 `http://服务器IP:43210`。首次访问会进入安全安装向导。
+
+常用参数：
+
+```bash
+# 自定义端口、Worker 数量和时区
+curl -fsSL https://raw.githubusercontent.com/wang4386/CDT-Monitor/main/install.sh | sudo bash -s -- --port 8080 --workers 2 --timezone Asia/Shanghai
+
+# 不自动安装 Docker
+sudo bash install.sh --no-install-docker
+```
+
+安装文件位于 `/opt/cdt-monitor`，数据默认保存于 `/opt/cdt-monitor/data`。管理命令：
+
+```bash
+cd /opt/cdt-monitor
+docker compose logs -f
+docker compose restart
+docker compose down
+```
+
+> 建议从可信网络下载脚本后再执行；脚本只会安装 Docker、拉取官方镜像并创建 Compose 配置。
+
 ## Docker 安装
 
 ### Docker Compose
