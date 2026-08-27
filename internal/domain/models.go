@@ -167,6 +167,7 @@ type NotificationEvent struct {
 	Type      string            `json:"type"`
 	Title     string            `json:"title"`
 	Summary   string            `json:"summary"`
+	Text      string            `json:"text,omitempty"`
 	AccountID int64             `json:"account_id,omitempty"`
 	Fields    map[string]string `json:"fields"`
 	CreatedAt time.Time         `json:"created_at"`

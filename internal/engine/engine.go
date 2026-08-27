@@ -29,17 +29,31 @@ const (
 )
 
 type Engine struct {
-	store        *store.Store
-	provider     aliyun.Provider
-	notify       *notify.Service
-	logger       *slog.Logger
-	owner        string
-	wake         chan struct{}
-	workers      int
-	started      sync.Once
-	accountLocks sync.Map
-	telegramMu   sync.Mutex
-	telegramNext int64
+	store         *store.Store
+	provider      aliyun.Provider
+	notify        *notify.Service
+	logger        *slog.Logger
+	owner         string
+	wake          chan struct{}
+	workers       int
+	started       sync.Once
+	accountLocks  sync.Map
+	telegramMu    sync.Mutex
+	telegramNext  int64
+	telegramChats sync.Map
+}
+
+type telegramChatSession struct {
+	Mode    string
+	Step    string
+	Field   string
+	Draft   domain.Account
+	Updated time.Time
+}
+
+type telegramReply struct {
+	Text     string
+	Keyboard notify.TelegramInlineKeyboard
 }
 
 var ErrMonitorBusy = errors.New("monitor scheduler lease is held by another process")
@@ -541,17 +555,37 @@ func (e *Engine) enqueueDailyReportIfDue(ctx context.Context, tick time.Time) er
 }
 
 func (e *Engine) dailyReportEvent(ctx context.Context, config domain.Config, now time.Time) (domain.NotificationEvent, error) {
-	summaries, lastRun, err := e.Summary(ctx)
+	text, fields, summary, err := e.buildDailyReport(ctx, config, now)
 	if err != nil {
 		return domain.NotificationEvent{}, err
+	}
+	event := newEvent("daily_report", "每日流量报告", summary, 0, fields)
+	event.Text = text
+	return event, nil
+}
+
+func (e *Engine) dailyReportText(ctx context.Context, config domain.Config, now time.Time) (string, error) {
+	text, _, _, err := e.buildDailyReport(ctx, config, now)
+	return text, err
+}
+
+func (e *Engine) buildDailyReport(ctx context.Context, config domain.Config, now time.Time) (string, map[string]string, string, error) {
+	summaries, lastRun, err := e.Summary(ctx)
+	if err != nil {
+		return "", nil, "", err
 	}
 	fields := make(map[string]string, len(summaries)+4)
 	totalUsed, totalLimit, totalToday := 0.0, 0.0, 0.0
 	dayStart := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+	type reportRow struct {
+		Account domain.AccountSummary
+		Today   float64
+	}
+	rows := make([]reportRow, 0, len(summaries))
 	for _, account := range summaries {
 		previous, ok, err := e.store.PreviousDailyTraffic(ctx, account.ID, dayStart)
 		if err != nil {
-			return domain.NotificationEvent{}, err
+			return "", nil, "", err
 		}
 		today := 0.0
 		if ok && account.FlowUsed >= previous {
@@ -562,6 +596,7 @@ func (e *Engine) dailyReportEvent(ctx context.Context, config domain.Config, now
 		totalToday += today
 		name := firstNonEmptyText(account.Remark, account.Account, strconv.FormatInt(account.ID, 10))
 		fields[fmt.Sprintf("#%d %s", account.ID, name)] = fmt.Sprintf("今日 +%.2f GB / 累计 %.2f GB / 额度 %.2f GB / %.2f%% / %s", today, account.FlowUsed, account.FlowTotal, account.Percentage, account.InstanceStatus)
+		rows = append(rows, reportRow{Account: account, Today: today})
 	}
 	percent := usagePercent(totalUsed, totalLimit)
 	fields["今日总增量"] = fmt.Sprintf("%.2f GB", totalToday)
@@ -569,28 +604,46 @@ func (e *Engine) dailyReportEvent(ctx context.Context, config domain.Config, now
 	if !lastRun.IsZero() {
 		fields["最近同步"] = lastRun.In(now.Location()).Format("2006-01-02 15:04:05")
 	}
-	title := "每日流量报告"
 	summary := fmt.Sprintf("%s CDT 流量日报：今日 +%.2f GB，累计 %.2f / %.2f GB。", now.Format("2006-01-02"), totalToday, totalUsed, totalLimit)
-	return newEvent("daily_report", title, summary, 0, fields), nil
-}
-
-func (e *Engine) dailyReportText(ctx context.Context, config domain.Config, now time.Time) (string, error) {
-	event, err := e.dailyReportEvent(ctx, config, now)
-	if err != nil {
-		return "", err
-	}
 	var builder strings.Builder
-	builder.WriteString("[CDT Monitor] ")
-	builder.WriteString(event.Title)
-	builder.WriteByte('\n')
-	builder.WriteString(event.Summary)
-	for key, value := range event.Fields {
-		builder.WriteByte('\n')
-		builder.WriteString(key)
-		builder.WriteString(": ")
-		builder.WriteString(value)
+	builder.WriteString("CDT 每日流量报告\n")
+	builder.WriteString("日期：")
+	builder.WriteString(now.Format("2006-01-02 15:04"))
+	builder.WriteString(" (")
+	builder.WriteString(config.Timezone)
+	builder.WriteString(")\n\n")
+	builder.WriteString(fmt.Sprintf("今日总增量：+%.2f GB\n", totalToday))
+	builder.WriteString(fmt.Sprintf("累计总流量：%.2f / %.2f GB (%.2f%%)\n", totalUsed, totalLimit, percent))
+	if !lastRun.IsZero() {
+		builder.WriteString("最近同步：")
+		builder.WriteString(lastRun.In(now.Location()).Format("2006-01-02 15:04:05"))
+		builder.WriteString("\n")
 	}
-	return builder.String(), nil
+	if len(rows) == 0 {
+		builder.WriteString("\n暂无实例。")
+		return builder.String(), fields, summary, nil
+	}
+	for index, item := range rows {
+		account := item.Account
+		name := firstNonEmptyText(account.Remark, account.Account, strconv.FormatInt(account.ID, 10))
+		remaining := account.FlowTotal - account.FlowUsed
+		if remaining < 0 {
+			remaining = 0
+		}
+		builder.WriteString("\n")
+		builder.WriteString(fmt.Sprintf("#%d %s\n", account.ID, name))
+		builder.WriteString(fmt.Sprintf("实例：%s\n", account.Account))
+		builder.WriteString(fmt.Sprintf("区域：%s\n", firstNonEmptyText(account.RegionName, account.Region)))
+		builder.WriteString(fmt.Sprintf("今日：+%.2f GB\n", item.Today))
+		builder.WriteString(fmt.Sprintf("已用：%.2f GB\n", account.FlowUsed))
+		builder.WriteString(fmt.Sprintf("剩余：%.2f GB\n", remaining))
+		builder.WriteString(fmt.Sprintf("使用率：%.2f%% %s\n", account.Percentage, trafficHealthLabel(account)))
+		builder.WriteString(fmt.Sprintf("状态：%s", statusLabel(account.InstanceStatus)))
+		if index < len(rows)-1 {
+			builder.WriteString("\n")
+		}
+	}
+	return builder.String(), fields, summary, nil
 }
 
 func (e *Engine) telegramBotWorker(ctx context.Context) {
@@ -637,6 +690,18 @@ func (e *Engine) pollTelegramBot(ctx context.Context) error {
 		if update.ChatID != tg.ChatID {
 			continue
 		}
+		if update.CallbackID != "" {
+			_ = e.notify.AnswerCallbackQuery(ctx, tg, update.CallbackID, "")
+			response := e.handleTelegramCallback(ctx, config, update.ChatID, update.CallbackData)
+			if response.Text != "" {
+				_ = e.notify.SendTelegramMessage(ctx, tg, update.ChatID, response.Text, response.Keyboard)
+			}
+			continue
+		}
+		if response := e.handleTelegramSession(ctx, config, update.ChatID, update.Text); response.Text != "" {
+			_ = e.notify.SendTelegramMessage(ctx, tg, update.ChatID, response.Text, response.Keyboard)
+			continue
+		}
 		parts := strings.Fields(update.Text)
 		if len(parts) == 0 {
 			continue
@@ -645,9 +710,9 @@ func (e *Engine) pollTelegramBot(ctx context.Context) error {
 		if at := strings.Index(command, "@"); at >= 0 {
 			command = command[:at]
 		}
-		response := e.handleTelegramCommand(ctx, config, command, parts[1:])
-		if response != "" {
-			_ = e.notify.SendTelegramText(ctx, tg, update.ChatID, response)
+		response := e.handleTelegramCommandReply(ctx, config, update.ChatID, command, parts[1:])
+		if response.Text != "" {
+			_ = e.notify.SendTelegramMessage(ctx, tg, update.ChatID, response.Text, response.Keyboard)
 		}
 	}
 	e.telegramMu.Lock()
@@ -708,6 +773,458 @@ func (e *Engine) handleTelegramCommand(ctx context.Context, config domain.Config
 		}
 		return ""
 	}
+}
+
+func (e *Engine) handleTelegramCommandReply(ctx context.Context, config domain.Config, chatID, command string, args []string) telegramReply {
+	location, locErr := time.LoadLocation(config.Timezone)
+	if locErr != nil {
+		location = time.FixedZone("CST", 8*3600)
+	}
+	switch command {
+	case "/report", "/daily", "/today":
+		text, err := e.dailyReportText(ctx, config, time.Now().In(location))
+		if err != nil {
+			return telegramReply{Text: "生成每日流量报告失败：" + err.Error()}
+		}
+		return telegramReply{Text: text, Keyboard: telegramReportKeyboard()}
+	case "/status":
+		text, err := e.telegramStatusPretty(ctx, config)
+		if err != nil {
+			return telegramReply{Text: "获取状态失败：" + err.Error()}
+		}
+		return telegramReply{Text: text, Keyboard: telegramMainKeyboard()}
+	case "/refresh":
+		if len(args) == 0 {
+			jobs, err := e.EnqueueRefreshAll(ctx)
+			if err != nil {
+				return telegramReply{Text: "刷新任务创建失败：" + err.Error()}
+			}
+			if len(jobs) == 0 {
+				return telegramReply{Text: "暂无可刷新的实例。", Keyboard: telegramMainKeyboard()}
+			}
+			return telegramReply{Text: fmt.Sprintf("已创建全部实例刷新任务，共 %d 个。", len(jobs)), Keyboard: telegramMainKeyboard()}
+		}
+		accountID, err := parseTelegramAccountID(args[0])
+		if err != nil {
+			return telegramReply{Text: "用法：/refresh <实例ID>"}
+		}
+		job, err := e.Enqueue(ctx, JobRefreshAccount, accountID, `{}`, JobUniqueKey(JobRefreshAccount, accountID, time.Now().UTC().Format("200601021504")))
+		if err != nil {
+			return telegramReply{Text: "刷新任务创建失败：" + err.Error()}
+		}
+		return telegramReply{Text: fmt.Sprintf("已创建实例 #%d 刷新任务：%s", accountID, job.ID)}
+	case "/startvm", "/boot":
+		return telegramReply{Text: e.enqueueTelegramControl(ctx, config, args, "start")}
+	case "/stopvm", "/shutdown":
+		return telegramReply{Text: e.enqueueTelegramControl(ctx, config, args, "stop")}
+	case "/accounts":
+		return e.telegramAccountsReply(ctx)
+	case "/settings":
+		return telegramReply{Text: telegramSettingsText(config), Keyboard: telegramSettingsKeyboard(config)}
+	case "/add":
+		return e.startTelegramAddAccount(chatID)
+	case "/cancel":
+		e.telegramChats.Delete(chatID)
+		return telegramReply{Text: "已取消当前操作。", Keyboard: telegramMainKeyboard()}
+	case "/start", "/help":
+		return telegramReply{Text: telegramHelpText(), Keyboard: telegramMainKeyboard()}
+	default:
+		if strings.HasPrefix(command, "/") {
+			return telegramReply{Text: "未知命令。\n\n" + telegramHelpText(), Keyboard: telegramMainKeyboard()}
+		}
+		return telegramReply{}
+	}
+}
+
+func (e *Engine) handleTelegramCallback(ctx context.Context, config domain.Config, chatID, data string) telegramReply {
+	switch data {
+	case "menu":
+		return telegramReply{Text: "CDT Monitor 控制菜单", Keyboard: telegramMainKeyboard()}
+	case "status":
+		text, err := e.telegramStatusPretty(ctx, config)
+		if err != nil {
+			return telegramReply{Text: "获取状态失败：" + err.Error()}
+		}
+		return telegramReply{Text: text, Keyboard: telegramMainKeyboard()}
+	case "report":
+		location, locErr := time.LoadLocation(config.Timezone)
+		if locErr != nil {
+			location = time.FixedZone("CST", 8*3600)
+		}
+		text, err := e.dailyReportText(ctx, config, time.Now().In(location))
+		if err != nil {
+			return telegramReply{Text: "生成每日流量报告失败：" + err.Error()}
+		}
+		return telegramReply{Text: text, Keyboard: telegramReportKeyboard()}
+	case "refresh_all":
+		jobs, err := e.EnqueueRefreshAll(ctx)
+		if err != nil {
+			return telegramReply{Text: "刷新任务创建失败：" + err.Error()}
+		}
+		return telegramReply{Text: fmt.Sprintf("已创建全部实例刷新任务，共 %d 个。", len(jobs)), Keyboard: telegramMainKeyboard()}
+	case "accounts":
+		return e.telegramAccountsReply(ctx)
+	case "add_account":
+		return e.startTelegramAddAccount(chatID)
+	case "settings":
+		return telegramReply{Text: telegramSettingsText(config), Keyboard: telegramSettingsKeyboard(config)}
+	case "set:daily:on":
+		config.EnableDailyReport = true
+		return e.saveTelegramConfig(ctx, config, "每日流量报告已开启。")
+	case "set:daily:off":
+		config.EnableDailyReport = false
+		return e.saveTelegramConfig(ctx, config, "每日流量报告已关闭。")
+	case "set:keepalive:on":
+		config.KeepAlive = true
+		return e.saveTelegramConfig(ctx, config, "抢占式实例保活已开启。")
+	case "set:keepalive:off":
+		config.KeepAlive = false
+		return e.saveTelegramConfig(ctx, config, "抢占式实例保活已关闭。")
+	case "set:billing:on":
+		config.EnableBilling = true
+		return e.saveTelegramConfig(ctx, config, "账单与余额已开启。")
+	case "set:billing:off":
+		config.EnableBilling = false
+		return e.saveTelegramConfig(ctx, config, "账单与余额已关闭。")
+	case "field:daily_time":
+		e.telegramChats.Store(chatID, telegramChatSession{Mode: "setting", Field: "daily_time", Updated: time.Now()})
+		return telegramReply{Text: "请输入日报时间，格式 HH:MM，例如 23:59。\n发送 /cancel 可取消。"}
+	case "field:threshold":
+		e.telegramChats.Store(chatID, telegramChatSession{Mode: "setting", Field: "threshold", Updated: time.Now()})
+		return telegramReply{Text: "请输入告警阈值 1-100，例如 95。\n发送 /cancel 可取消。"}
+	case "field:api_interval":
+		e.telegramChats.Store(chatID, telegramChatSession{Mode: "setting", Field: "api_interval", Updated: time.Now()})
+		return telegramReply{Text: "请输入 API 刷新间隔秒数，范围 30-86400，例如 300。\n发送 /cancel 可取消。"}
+	case "field:timezone":
+		e.telegramChats.Store(chatID, telegramChatSession{Mode: "setting", Field: "timezone", Updated: time.Now()})
+		return telegramReply{Text: "请输入系统时区，例如 Asia/Shanghai。\n发送 /cancel 可取消。"}
+	}
+	if strings.HasPrefix(data, "account:") {
+		id, err := parseTelegramAccountID(strings.TrimPrefix(data, "account:"))
+		if err != nil {
+			return telegramReply{Text: "实例 ID 无效。"}
+		}
+		return e.telegramAccountDetail(ctx, id)
+	}
+	if strings.HasPrefix(data, "refresh:") {
+		id, err := parseTelegramAccountID(strings.TrimPrefix(data, "refresh:"))
+		if err != nil {
+			return telegramReply{Text: "实例 ID 无效。"}
+		}
+		job, err := e.Enqueue(ctx, JobRefreshAccount, id, `{}`, JobUniqueKey(JobRefreshAccount, id, time.Now().UTC().Format("200601021504")))
+		if err != nil {
+			return telegramReply{Text: "刷新任务创建失败：" + err.Error()}
+		}
+		return telegramReply{Text: fmt.Sprintf("已创建实例 #%d 刷新任务：%s", id, job.ID), Keyboard: telegramAccountKeyboard(id)}
+	}
+	if strings.HasPrefix(data, "start:") || strings.HasPrefix(data, "stop:") {
+		action := "start"
+		idText := strings.TrimPrefix(data, "start:")
+		if strings.HasPrefix(data, "stop:") {
+			action = "stop"
+			idText = strings.TrimPrefix(data, "stop:")
+		}
+		return telegramReply{Text: e.enqueueTelegramControl(ctx, config, []string{idText}, action), Keyboard: telegramAccountKeyboardFromText(idText)}
+	}
+	return telegramReply{Text: "未知按钮。", Keyboard: telegramMainKeyboard()}
+}
+
+func (e *Engine) handleTelegramSession(ctx context.Context, config domain.Config, chatID, text string) telegramReply {
+	text = strings.TrimSpace(text)
+	if strings.EqualFold(text, "/cancel") {
+		e.telegramChats.Delete(chatID)
+		return telegramReply{Text: "已取消当前操作。", Keyboard: telegramMainKeyboard()}
+	}
+	value, ok := e.telegramChats.Load(chatID)
+	if !ok {
+		return telegramReply{}
+	}
+	session := value.(telegramChatSession)
+	if time.Since(session.Updated) > 30*time.Minute {
+		e.telegramChats.Delete(chatID)
+		return telegramReply{Text: "上一次操作已超时，请重新开始。", Keyboard: telegramMainKeyboard()}
+	}
+	session.Updated = time.Now()
+	if session.Mode == "setting" {
+		return e.applyTelegramSetting(ctx, config, chatID, session.Field, text)
+	}
+	if session.Mode == "add_account" {
+		return e.handleTelegramAddAccountStep(ctx, config, chatID, session, text)
+	}
+	return telegramReply{}
+}
+
+func (e *Engine) startTelegramAddAccount(chatID string) telegramReply {
+	e.telegramChats.Store(chatID, telegramChatSession{Mode: "add_account", Step: "access_key_id", Draft: domain.Account{MaxTraffic: 200, SiteType: "china", StartTime: "09:00", StopTime: "23:00"}, Updated: time.Now()})
+	return telegramReply{Text: "开始添加实例。\n请发送 AccessKey ID。\n发送 /cancel 可取消。"}
+}
+
+func (e *Engine) handleTelegramAddAccountStep(ctx context.Context, config domain.Config, chatID string, session telegramChatSession, text string) telegramReply {
+	switch session.Step {
+	case "access_key_id":
+		session.Draft.AccessKeyID = text
+		session.Step = "access_key_secret"
+		e.telegramChats.Store(chatID, session)
+		return telegramReply{Text: "请发送 AccessKey Secret。"}
+	case "access_key_secret":
+		session.Draft.AccessKeySecret = text
+		session.Step = "region_id"
+		e.telegramChats.Store(chatID, session)
+		return telegramReply{Text: "请发送区域 ID，例如 cn-hongkong。"}
+	case "region_id":
+		session.Draft.RegionID = text
+		session.Step = "instance_id"
+		e.telegramChats.Store(chatID, session)
+		return telegramReply{Text: "请发送实例 ID。"}
+	case "instance_id":
+		session.Draft.InstanceID = text
+		session.Step = "max_traffic"
+		e.telegramChats.Store(chatID, session)
+		return telegramReply{Text: "请发送月流量额度 GB，例如 200。"}
+	case "max_traffic":
+		traffic, err := strconv.ParseFloat(text, 64)
+		if err != nil || traffic <= 0 {
+			return telegramReply{Text: "流量额度需要是大于 0 的数字，例如 200。"}
+		}
+		session.Draft.MaxTraffic = traffic
+		session.Step = "site_type"
+		e.telegramChats.Store(chatID, session)
+		return telegramReply{Text: "请选择站点类型：china 或 international。"}
+	case "site_type":
+		siteType := strings.ToLower(text)
+		if siteType != "international" {
+			siteType = "china"
+		}
+		session.Draft.SiteType = siteType
+		session.Step = "remark"
+		e.telegramChats.Store(chatID, session)
+		return telegramReply{Text: "请发送备注名；不需要备注可发送 -。"}
+	case "remark":
+		if text != "-" {
+			session.Draft.Remark = text
+		}
+		config.Accounts = append(config.Accounts, session.Draft)
+		if err := e.store.SaveConfig(ctx, config); err != nil {
+			return telegramReply{Text: "保存实例失败：" + err.Error()}
+		}
+		e.telegramChats.Delete(chatID)
+		return telegramReply{Text: "实例已添加，稍后可刷新同步状态。", Keyboard: telegramMainKeyboard()}
+	default:
+		e.telegramChats.Delete(chatID)
+		return telegramReply{Text: "添加流程状态异常，请重新开始。", Keyboard: telegramMainKeyboard()}
+	}
+}
+
+func (e *Engine) applyTelegramSetting(ctx context.Context, config domain.Config, chatID, field, text string) telegramReply {
+	switch field {
+	case "daily_time":
+		if _, err := time.Parse("15:04", text); err != nil {
+			return telegramReply{Text: "时间格式不正确，请输入 HH:MM，例如 23:59。"}
+		}
+		config.DailyReportTime = text
+	case "threshold":
+		value, err := strconv.Atoi(text)
+		if err != nil || value < 1 || value > 100 {
+			return telegramReply{Text: "告警阈值需要是 1-100 的整数。"}
+		}
+		config.TrafficThreshold = value
+	case "api_interval":
+		value, err := strconv.Atoi(text)
+		if err != nil || value < 30 || value > 86400 {
+			return telegramReply{Text: "API 刷新间隔需要是 30-86400 秒。"}
+		}
+		config.APIInterval = value
+	case "timezone":
+		if _, err := time.LoadLocation(text); err != nil {
+			return telegramReply{Text: "时区无效，请输入类似 Asia/Shanghai 的 IANA 时区。"}
+		}
+		config.Timezone = text
+	default:
+		e.telegramChats.Delete(chatID)
+		return telegramReply{Text: "未知设置项。", Keyboard: telegramSettingsKeyboard(config)}
+	}
+	if err := e.store.SaveConfig(ctx, config); err != nil {
+		return telegramReply{Text: "保存设置失败：" + err.Error()}
+	}
+	e.telegramChats.Delete(chatID)
+	return telegramReply{Text: "设置已保存。\n\n" + telegramSettingsText(config), Keyboard: telegramSettingsKeyboard(config)}
+}
+
+func (e *Engine) saveTelegramConfig(ctx context.Context, config domain.Config, text string) telegramReply {
+	if err := e.store.SaveConfig(ctx, config); err != nil {
+		return telegramReply{Text: "保存设置失败：" + err.Error()}
+	}
+	return telegramReply{Text: text + "\n\n" + telegramSettingsText(config), Keyboard: telegramSettingsKeyboard(config)}
+}
+
+func (e *Engine) telegramAccountsReply(ctx context.Context) telegramReply {
+	summaries, _, err := e.Summary(ctx)
+	if err != nil {
+		return telegramReply{Text: "获取实例列表失败：" + err.Error()}
+	}
+	if len(summaries) == 0 {
+		return telegramReply{Text: "暂无实例。", Keyboard: telegramMainKeyboard()}
+	}
+	var builder strings.Builder
+	builder.WriteString("实例列表\n")
+	for _, account := range summaries {
+		name := firstNonEmptyText(account.Remark, account.Account, strconv.FormatInt(account.ID, 10))
+		builder.WriteString(fmt.Sprintf("\n#%d %s\n%.2f / %.2f GB (%.2f%%) · %s", account.ID, name, account.FlowUsed, account.FlowTotal, account.Percentage, statusLabel(account.InstanceStatus)))
+	}
+	return telegramReply{Text: builder.String(), Keyboard: telegramAccountsKeyboard(summaries)}
+}
+
+func (e *Engine) telegramAccountDetail(ctx context.Context, id int64) telegramReply {
+	summaries, _, err := e.Summary(ctx)
+	if err != nil {
+		return telegramReply{Text: "获取实例失败：" + err.Error()}
+	}
+	for _, account := range summaries {
+		if account.ID == id {
+			name := firstNonEmptyText(account.Remark, account.Account, strconv.FormatInt(account.ID, 10))
+			text := fmt.Sprintf("#%d %s\n区域：%s\n流量：%.2f / %.2f GB (%.2f%%)\n状态：%s", account.ID, name, firstNonEmptyText(account.RegionName, account.Region), account.FlowUsed, account.FlowTotal, account.Percentage, statusLabel(account.InstanceStatus))
+			return telegramReply{Text: text, Keyboard: telegramAccountKeyboard(id)}
+		}
+	}
+	return telegramReply{Text: fmt.Sprintf("未找到实例 #%d。", id), Keyboard: telegramMainKeyboard()}
+}
+
+func (e *Engine) telegramStatusPretty(ctx context.Context, config domain.Config) (string, error) {
+	summaries, lastRun, err := e.Summary(ctx)
+	if err != nil {
+		return "", err
+	}
+	running, warning, used, total := 0, 0, 0.0, 0.0
+	for _, account := range summaries {
+		if account.InstanceStatus == domain.StatusRunning {
+			running++
+		}
+		if account.OverThreshold {
+			warning++
+		}
+		used += account.FlowUsed
+		total += account.FlowTotal
+	}
+	var builder strings.Builder
+	builder.WriteString("CDT Monitor 状态\n")
+	builder.WriteString(fmt.Sprintf("实例：%d 台，运行中：%d 台，告警：%d 项\n", len(summaries), running, warning))
+	builder.WriteString(fmt.Sprintf("总流量：%.2f / %.2f GB (%.2f%%)", used, total, usagePercent(used, total)))
+	if !lastRun.IsZero() {
+		location, locErr := time.LoadLocation(config.Timezone)
+		if locErr != nil {
+			location = time.FixedZone("CST", 8*3600)
+		}
+		builder.WriteString("\n最近同步：")
+		builder.WriteString(lastRun.In(location).Format("2006-01-02 15:04:05"))
+	}
+	for _, account := range summaries {
+		name := firstNonEmptyText(account.Remark, account.Account, strconv.FormatInt(account.ID, 10))
+		builder.WriteString(fmt.Sprintf("\n#%d %s：%.2f / %.2f GB (%.2f%%)，%s", account.ID, name, account.FlowUsed, account.FlowTotal, account.Percentage, statusLabel(account.InstanceStatus)))
+	}
+	return builder.String(), nil
+}
+
+func telegramMainKeyboard() notify.TelegramInlineKeyboard {
+	return notify.TelegramInlineKeyboard{
+		{{Text: "状态", CallbackData: "status"}, {Text: "日报", CallbackData: "report"}},
+		{{Text: "刷新全部", CallbackData: "refresh_all"}, {Text: "实例列表", CallbackData: "accounts"}},
+		{{Text: "添加实例", CallbackData: "add_account"}, {Text: "设置", CallbackData: "settings"}},
+	}
+}
+
+func telegramReportKeyboard() notify.TelegramInlineKeyboard {
+	return notify.TelegramInlineKeyboard{{{Text: "刷新日报", CallbackData: "report"}, {Text: "返回菜单", CallbackData: "menu"}}}
+}
+
+func telegramAccountsKeyboard(accounts []domain.AccountSummary) notify.TelegramInlineKeyboard {
+	keyboard := make(notify.TelegramInlineKeyboard, 0, len(accounts)+1)
+	for _, account := range accounts {
+		name := firstNonEmptyText(account.Remark, account.Account, strconv.FormatInt(account.ID, 10))
+		keyboard = append(keyboard, []notify.TelegramInlineButton{{Text: fmt.Sprintf("#%d %s", account.ID, name), CallbackData: fmt.Sprintf("account:%d", account.ID)}})
+	}
+	keyboard = append(keyboard, []notify.TelegramInlineButton{{Text: "添加实例", CallbackData: "add_account"}, {Text: "返回菜单", CallbackData: "menu"}})
+	return keyboard
+}
+
+func telegramAccountKeyboard(id int64) notify.TelegramInlineKeyboard {
+	return notify.TelegramInlineKeyboard{
+		{{Text: "刷新", CallbackData: fmt.Sprintf("refresh:%d", id)}, {Text: "开机", CallbackData: fmt.Sprintf("start:%d", id)}, {Text: "关机", CallbackData: fmt.Sprintf("stop:%d", id)}},
+		{{Text: "实例列表", CallbackData: "accounts"}, {Text: "返回菜单", CallbackData: "menu"}},
+	}
+}
+
+func telegramAccountKeyboardFromText(idText string) notify.TelegramInlineKeyboard {
+	id, err := parseTelegramAccountID(idText)
+	if err != nil {
+		return telegramMainKeyboard()
+	}
+	return telegramAccountKeyboard(id)
+}
+
+func telegramSettingsKeyboard(config domain.Config) notify.TelegramInlineKeyboard {
+	daily := "开启日报"
+	dailyData := "set:daily:on"
+	if config.EnableDailyReport {
+		daily = "关闭日报"
+		dailyData = "set:daily:off"
+	}
+	keepAlive := "开启保活"
+	keepAliveData := "set:keepalive:on"
+	if config.KeepAlive {
+		keepAlive = "关闭保活"
+		keepAliveData = "set:keepalive:off"
+	}
+	billing := "开启账单"
+	billingData := "set:billing:on"
+	if config.EnableBilling {
+		billing = "关闭账单"
+		billingData = "set:billing:off"
+	}
+	return notify.TelegramInlineKeyboard{
+		{{Text: daily, CallbackData: dailyData}, {Text: "日报时间", CallbackData: "field:daily_time"}},
+		{{Text: "告警阈值", CallbackData: "field:threshold"}, {Text: "刷新间隔", CallbackData: "field:api_interval"}},
+		{{Text: keepAlive, CallbackData: keepAliveData}, {Text: billing, CallbackData: billingData}},
+		{{Text: "系统时区", CallbackData: "field:timezone"}, {Text: "返回菜单", CallbackData: "menu"}},
+	}
+}
+
+func telegramSettingsText(config domain.Config) string {
+	return fmt.Sprintf("当前设置\n日报：%s，时间：%s\n时区：%s\n告警阈值：%d%%\nAPI 刷新间隔：%d 秒\n保活：%s\n账单与余额：%s",
+		boolLabel(config.EnableDailyReport), config.DailyReportTime, config.Timezone, config.TrafficThreshold, config.APIInterval, boolLabel(config.KeepAlive), boolLabel(config.EnableBilling))
+}
+
+func boolLabel(value bool) string {
+	if value {
+		return "开启"
+	}
+	return "关闭"
+}
+
+func statusLabel(status string) string {
+	switch status {
+	case domain.StatusRunning:
+		return "运行中"
+	case domain.StatusStopped:
+		return "已停止"
+	case domain.StatusStarting:
+		return "启动中"
+	case domain.StatusStopping:
+		return "停止中"
+	case "Pending":
+		return "等待中"
+	default:
+		return "未知"
+	}
+}
+
+func trafficHealthLabel(account domain.AccountSummary) string {
+	if account.OverThreshold {
+		return "告警"
+	}
+	if account.Percentage >= 80 {
+		return "注意"
+	}
+	return "正常"
 }
 
 func (e *Engine) enqueueTelegramControl(ctx context.Context, config domain.Config, args []string, action string) string {
@@ -785,12 +1302,19 @@ func parseTelegramAccountID(value string) (int64, error) {
 
 func telegramHelpText() string {
 	return `CDT Monitor Bot 可用命令：
+/start 打开内联按钮菜单
 /status 查看实例与流量状态
 /report 获取今日流量报告
+/daily 获取今日流量报告
+/today 获取今日流量报告
 /refresh 刷新全部实例
 /refresh <实例ID> 刷新指定实例
 /startvm <实例ID> 开机
 /stopvm <实例ID> 关机
+/accounts 查看实例列表
+/settings 查看和修改面板设置
+/add 在 Bot 中添加实例
+/cancel 取消当前添加或设置流程
 /help 查看帮助`
 }
 

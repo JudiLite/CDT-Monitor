@@ -248,11 +248,12 @@ GET /monitor.php?key=<具有 cron:run scope 的 API Key>
 
 ## 每日流量报告与 Telegram Bot
 
-系统设置中可以开启“每日流量报告”，默认在 `23:59` 按控制台时区生成报告，并通过已启用的通知通道发送。报告包含每个实例的今日增量、累计流量、额度、使用率和实例状态。
+系统设置中的“每日流量报告”“日报时间”和“系统时区”是日报的唯一来源：开启后会按面板配置的时间生成报告，并通过已启用的通知通道发送。报告格式会按实例列出今日增量、已用、剩余、使用率、区域和状态，适合直接在 Telegram 中阅读。
 
 启用 Telegram 通知并保存 Bot Token 与 Chat ID 后，可以在对应 Chat 中发送以下命令交互管理：
 
 ```text
+/start
 /status
 /report
 /daily
@@ -261,10 +262,16 @@ GET /monitor.php?key=<具有 cron:run scope 的 API Key>
 /refresh <实例ID>
 /startvm <实例ID>
 /stopvm <实例ID>
+/accounts
+/settings
+/add
+/cancel
 /help
 ```
 
-Bot 只响应配置中的 Chat ID，其他会话的消息会被忽略。
+Bot 支持内联按钮菜单，可以点按查看状态、获取日报、刷新全部、打开实例列表、对单个实例刷新/开机/关机、进入设置和添加实例。设置菜单支持切换日报、保活、账单与余额，并可修改日报时间、告警阈值、API 刷新间隔和系统时区。添加实例会按步骤要求输入 AccessKey ID、AccessKey Secret、区域 ID、实例 ID、流量额度、站点类型和备注。
+
+Bot 只响应配置中的 Chat ID，其他会话的消息会被忽略；输入 `/cancel` 可以取消正在进行的添加实例或设置流程。
 
 ## 相关链接
 
