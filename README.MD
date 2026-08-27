@@ -250,12 +250,18 @@ GET /monitor.php?key=<具有 cron:run scope 的 API Key>
 
 系统设置中可以开启“每日流量报告”，默认在 `23:59` 按控制台时区生成报告，并通过已启用的通知通道发送。报告包含每个实例的今日增量、累计流量、额度、使用率和实例状态。
 
-启用 Telegram 通知并保存 Bot Token 与 Chat ID 后，可以在对应 Chat 中发送以下命令交互获取实时报告：
+启用 Telegram 通知并保存 Bot Token 与 Chat ID 后，可以在对应 Chat 中发送以下命令交互管理：
 
 ```text
+/status
 /report
 /daily
 /today
+/refresh
+/refresh <实例ID>
+/startvm <实例ID>
+/stopvm <实例ID>
+/help
 ```
 
 Bot 只响应配置中的 Chat ID，其他会话的消息会被忽略。
@@ -263,8 +269,6 @@ Bot 只响应配置中的 Chat ID，其他会话的消息会被忽略。
 ## 相关链接
 
 - 项目主页：[GitHub](https://github.com/JudiLite/CDT-Monitor)
-- 作者博客：[qninq.cn](https://qninq.cn)
-- 技术社区：[NodeSeek](https://www.nodeseek.com/) · [Linux.do](https://linux.do/)
 
 ## 本地开发
 

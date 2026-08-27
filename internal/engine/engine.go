@@ -561,7 +561,7 @@ func (e *Engine) dailyReportEvent(ctx context.Context, config domain.Config, now
 		totalLimit += account.FlowTotal
 		totalToday += today
 		name := firstNonEmptyText(account.Remark, account.Account, strconv.FormatInt(account.ID, 10))
-		fields[name] = fmt.Sprintf("今日 +%.2f GB / 累计 %.2f GB / 额度 %.2f GB / %.2f%% / %s", today, account.FlowUsed, account.FlowTotal, account.Percentage, account.InstanceStatus)
+		fields[fmt.Sprintf("#%d %s", account.ID, name)] = fmt.Sprintf("今日 +%.2f GB / 累计 %.2f GB / 额度 %.2f GB / %.2f%% / %s", today, account.FlowUsed, account.FlowTotal, account.Percentage, account.InstanceStatus)
 	}
 	percent := usagePercent(totalUsed, totalLimit)
 	fields["今日总增量"] = fmt.Sprintf("%.2f GB", totalToday)
@@ -645,19 +645,9 @@ func (e *Engine) pollTelegramBot(ctx context.Context) error {
 		if at := strings.Index(command, "@"); at >= 0 {
 			command = command[:at]
 		}
-		switch command {
-		case "/report", "/daily", "/today":
-			location, locErr := time.LoadLocation(config.Timezone)
-			if locErr != nil {
-				location = time.FixedZone("CST", 8*3600)
-			}
-			text, reportErr := e.dailyReportText(ctx, config, time.Now().In(location))
-			if reportErr != nil {
-				text = "生成每日流量报告失败：" + reportErr.Error()
-			}
-			_ = e.notify.SendTelegramText(ctx, tg, update.ChatID, text)
-		case "/start", "/help":
-			_ = e.notify.SendTelegramText(ctx, tg, update.ChatID, "CDT Monitor Bot 可用命令：\n/report 获取今日流量报告\n/daily 获取今日流量报告\n/today 获取今日流量报告")
+		response := e.handleTelegramCommand(ctx, config, command, parts[1:])
+		if response != "" {
+			_ = e.notify.SendTelegramText(ctx, tg, update.ChatID, response)
 		}
 	}
 	e.telegramMu.Lock()
@@ -666,6 +656,142 @@ func (e *Engine) pollTelegramBot(ctx context.Context) error {
 	}
 	e.telegramMu.Unlock()
 	return nil
+}
+
+func (e *Engine) handleTelegramCommand(ctx context.Context, config domain.Config, command string, args []string) string {
+	location, locErr := time.LoadLocation(config.Timezone)
+	if locErr != nil {
+		location = time.FixedZone("CST", 8*3600)
+	}
+	switch command {
+	case "/report", "/daily", "/today":
+		text, err := e.dailyReportText(ctx, config, time.Now().In(location))
+		if err != nil {
+			return "生成每日流量报告失败：" + err.Error()
+		}
+		return text
+	case "/status":
+		text, err := e.telegramStatusText(ctx, config)
+		if err != nil {
+			return "获取状态失败：" + err.Error()
+		}
+		return text
+	case "/refresh":
+		if len(args) == 0 {
+			jobs, err := e.EnqueueRefreshAll(ctx)
+			if err != nil {
+				return "刷新任务创建失败：" + err.Error()
+			}
+			if len(jobs) == 0 {
+				return "暂无可刷新的实例。"
+			}
+			return fmt.Sprintf("已创建全部实例刷新任务，共 %d 个。", len(jobs))
+		}
+		accountID, err := parseTelegramAccountID(args[0])
+		if err != nil {
+			return "用法：/refresh <实例ID>"
+		}
+		job, err := e.Enqueue(ctx, JobRefreshAccount, accountID, `{}`, JobUniqueKey(JobRefreshAccount, accountID, time.Now().UTC().Format("200601021504")))
+		if err != nil {
+			return "刷新任务创建失败：" + err.Error()
+		}
+		return fmt.Sprintf("已创建实例 #%d 刷新任务：%s", accountID, job.ID)
+	case "/startvm", "/boot":
+		return e.enqueueTelegramControl(ctx, config, args, "start")
+	case "/stopvm", "/shutdown":
+		return e.enqueueTelegramControl(ctx, config, args, "stop")
+	case "/start", "/help":
+		return telegramHelpText()
+	default:
+		if strings.HasPrefix(command, "/") {
+			return "未知命令。\n\n" + telegramHelpText()
+		}
+		return ""
+	}
+}
+
+func (e *Engine) enqueueTelegramControl(ctx context.Context, config domain.Config, args []string, action string) string {
+	if len(args) == 0 {
+		if action == "start" {
+			return "用法：/startvm <实例ID>"
+		}
+		return "用法：/stopvm <实例ID>"
+	}
+	accountID, err := parseTelegramAccountID(args[0])
+	if err != nil {
+		if action == "start" {
+			return "用法：/startvm <实例ID>"
+		}
+		return "用法：/stopvm <实例ID>"
+	}
+	if config.KeepAlive && action == "stop" {
+		return "保活启用时不能手动关机。"
+	}
+	if _, err = e.store.GetAccount(ctx, accountID); err != nil {
+		return fmt.Sprintf("未找到实例 #%d。", accountID)
+	}
+	job, err := e.Enqueue(ctx, JobControlInstance, accountID, ParseControlPayload(action, "Telegram"), JobUniqueKey(JobControlInstance, accountID, action))
+	if err != nil {
+		return "控制任务创建失败：" + err.Error()
+	}
+	label := map[string]string{"start": "开机", "stop": "关机"}[action]
+	return fmt.Sprintf("已创建实例 #%d %s任务：%s", accountID, label, job.ID)
+}
+
+func (e *Engine) telegramStatusText(ctx context.Context, config domain.Config) (string, error) {
+	summaries, lastRun, err := e.Summary(ctx)
+	if err != nil {
+		return "", err
+	}
+	var builder strings.Builder
+	running, warning, used, total := 0, 0, 0.0, 0.0
+	for _, account := range summaries {
+		if account.InstanceStatus == domain.StatusRunning {
+			running++
+		}
+		if account.OverThreshold {
+			warning++
+		}
+		used += account.FlowUsed
+		total += account.FlowTotal
+	}
+	builder.WriteString("[CDT Monitor] 实例状态\n")
+	builder.WriteString(fmt.Sprintf("实例：%d 台，运行中：%d 台，告警：%d 项\n", len(summaries), running, warning))
+	builder.WriteString(fmt.Sprintf("总流量：%.2f / %.2f GB (%.2f%%)", used, total, usagePercent(used, total)))
+	if !lastRun.IsZero() {
+		location, locErr := time.LoadLocation(config.Timezone)
+		if locErr != nil {
+			location = time.FixedZone("CST", 8*3600)
+		}
+		builder.WriteString("\n最近同步：")
+		builder.WriteString(lastRun.In(location).Format("2006-01-02 15:04:05"))
+	}
+	for _, account := range summaries {
+		name := firstNonEmptyText(account.Remark, account.Account, strconv.FormatInt(account.ID, 10))
+		builder.WriteString("\n")
+		builder.WriteString(fmt.Sprintf("#%d %s：%.2f / %.2f GB (%.2f%%)，%s", account.ID, name, account.FlowUsed, account.FlowTotal, account.Percentage, account.InstanceStatus))
+	}
+	return builder.String(), nil
+}
+
+func parseTelegramAccountID(value string) (int64, error) {
+	value = strings.TrimPrefix(strings.TrimSpace(value), "#")
+	id, err := strconv.ParseInt(value, 10, 64)
+	if err != nil || id < 1 {
+		return 0, errors.New("invalid account id")
+	}
+	return id, nil
+}
+
+func telegramHelpText() string {
+	return `CDT Monitor Bot 可用命令：
+/status 查看实例与流量状态
+/report 获取今日流量报告
+/refresh 刷新全部实例
+/refresh <实例ID> 刷新指定实例
+/startvm <实例ID> 开机
+/stopvm <实例ID> 关机
+/help 查看帮助`
 }
 
 func (e *Engine) signal() {
