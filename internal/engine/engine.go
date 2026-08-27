@@ -29,18 +29,20 @@ const (
 )
 
 type Engine struct {
-	store         *store.Store
-	provider      aliyun.Provider
-	notify        *notify.Service
-	logger        *slog.Logger
-	owner         string
-	wake          chan struct{}
-	workers       int
-	started       sync.Once
-	accountLocks  sync.Map
-	telegramMu    sync.Mutex
-	telegramNext  int64
-	telegramChats sync.Map
+	store                 *store.Store
+	provider              aliyun.Provider
+	notify                *notify.Service
+	logger                *slog.Logger
+	owner                 string
+	wake                  chan struct{}
+	workers               int
+	started               sync.Once
+	accountLocks          sync.Map
+	telegramMu            sync.Mutex
+	telegramNext          int64
+	telegramBotKey        string
+	telegramBotCommandTry time.Time
+	telegramChats         sync.Map
 }
 
 type telegramChatSession struct {
@@ -647,7 +649,7 @@ func (e *Engine) buildDailyReport(ctx context.Context, config domain.Config, now
 }
 
 func (e *Engine) telegramBotWorker(ctx context.Context) {
-	ticker := time.NewTicker(30 * time.Second)
+	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 	for {
 		if err := e.pollTelegramBot(ctx); err != nil && !errors.Is(err, context.Canceled) {
@@ -677,7 +679,10 @@ func (e *Engine) pollTelegramBot(ctx context.Context) error {
 	e.telegramMu.Lock()
 	offset := e.telegramNext
 	e.telegramMu.Unlock()
-	pollCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	if err = e.ensureTelegramCommands(ctx, tg); err != nil {
+		e.logger.Warn("telegram bot commands skipped", "error", err)
+	}
+	pollCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	updates, err := e.notify.PollTelegramUpdates(pollCtx, tg, offset)
 	cancel()
 	if err != nil {
@@ -694,7 +699,11 @@ func (e *Engine) pollTelegramBot(ctx context.Context) error {
 			_ = e.notify.AnswerCallbackQuery(ctx, tg, update.CallbackID, "")
 			response := e.handleTelegramCallback(ctx, config, update.ChatID, update.CallbackData)
 			if response.Text != "" {
-				_ = e.notify.SendTelegramMessage(ctx, tg, update.ChatID, response.Text, response.Keyboard)
+				if err := e.notify.EditTelegramMessage(ctx, tg, update.ChatID, update.MessageID, response.Text, response.Keyboard); err != nil {
+					if !strings.Contains(err.Error(), "message is not modified") {
+						_ = e.notify.SendTelegramMessage(ctx, tg, update.ChatID, response.Text, response.Keyboard)
+					}
+				}
 			}
 			continue
 		}
@@ -775,6 +784,40 @@ func (e *Engine) handleTelegramCommand(ctx context.Context, config domain.Config
 	}
 }
 
+func (e *Engine) ensureTelegramCommands(ctx context.Context, config domain.TelegramConfig) error {
+	key := strings.Join([]string{config.Token, config.ProxyType, config.ProxyURL, config.ProxyIP, config.ProxyPort}, "|")
+	e.telegramMu.Lock()
+	if e.telegramBotKey == key {
+		e.telegramMu.Unlock()
+		return nil
+	}
+	if !e.telegramBotCommandTry.IsZero() && time.Since(e.telegramBotCommandTry) < time.Hour {
+		e.telegramMu.Unlock()
+		return nil
+	}
+	e.telegramBotCommandTry = time.Now()
+	e.telegramMu.Unlock()
+	commands := []notify.TelegramBotCommand{
+		{Command: "start", Description: "打开控制菜单"},
+		{Command: "status", Description: "查看实例与流量状态"},
+		{Command: "report", Description: "获取今日流量报告"},
+		{Command: "refresh", Description: "刷新全部或指定实例"},
+		{Command: "accounts", Description: "查看实例列表"},
+		{Command: "settings", Description: "查看和修改面板设置"},
+		{Command: "add", Description: "在 Bot 中添加实例"},
+		{Command: "cancel", Description: "取消当前流程"},
+		{Command: "help", Description: "查看帮助"},
+	}
+	if err := e.notify.SetTelegramCommands(ctx, config, commands); err != nil {
+		return err
+	}
+	e.telegramMu.Lock()
+	e.telegramBotKey = key
+	e.telegramBotCommandTry = time.Time{}
+	e.telegramMu.Unlock()
+	return nil
+}
+
 func (e *Engine) handleTelegramCommandReply(ctx context.Context, config domain.Config, chatID, command string, args []string) telegramReply {
 	location, locErr := time.LoadLocation(config.Timezone)
 	if locErr != nil {
@@ -826,7 +869,9 @@ func (e *Engine) handleTelegramCommandReply(ctx context.Context, config domain.C
 	case "/cancel":
 		e.telegramChats.Delete(chatID)
 		return telegramReply{Text: "已取消当前操作。", Keyboard: telegramMainKeyboard()}
-	case "/start", "/help":
+	case "/start":
+		return telegramReply{Text: "CDT Monitor 控制菜单", Keyboard: telegramMainKeyboard()}
+	case "/help":
 		return telegramReply{Text: telegramHelpText(), Keyboard: telegramMainKeyboard()}
 	default:
 		if strings.HasPrefix(command, "/") {

@@ -34,6 +34,7 @@ type Service struct {
 type TelegramUpdate struct {
 	UpdateID     int64
 	ChatID       string
+	MessageID    int64
 	Text         string
 	CallbackID   string
 	CallbackData string
@@ -45,6 +46,11 @@ type TelegramInlineButton struct {
 }
 
 type TelegramInlineKeyboard [][]TelegramInlineButton
+
+type TelegramBotCommand struct {
+	Command     string `json:"command"`
+	Description string `json:"description"`
+}
 
 func New() *Service {
 	return &Service{httpClient: &http.Client{Timeout: 12 * time.Second}}
@@ -196,6 +202,43 @@ func (s *Service) SendTelegramMessage(ctx context.Context, config domain.Telegra
 	return nil
 }
 
+func (s *Service) EditTelegramMessage(ctx context.Context, config domain.TelegramConfig, chatID string, messageID int64, text string, keyboard TelegramInlineKeyboard) error {
+	if chatID == "" {
+		chatID = config.ChatID
+	}
+	if messageID == 0 {
+		return errors.New("telegram message id is required")
+	}
+	baseURL, client, err := s.telegramEndpoint(config)
+	if err != nil {
+		return err
+	}
+	endpoint := baseURL + "/bot" + config.Token + "/editMessageText"
+	form := url.Values{"chat_id": {chatID}, "message_id": {strconv.FormatInt(messageID, 10)}, "text": {text}}
+	if len(keyboard) > 0 {
+		markup, err := json.Marshal(map[string]any{"inline_keyboard": keyboard})
+		if err != nil {
+			return err
+		}
+		form.Set("reply_markup", string(markup))
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(form.Encode()))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("telegram HTTP %d: %s", resp.StatusCode, string(body))
+	}
+	return nil
+}
+
 func (s *Service) AnswerCallbackQuery(ctx context.Context, config domain.TelegramConfig, callbackID, text string) error {
 	if callbackID == "" {
 		return nil
@@ -226,13 +269,41 @@ func (s *Service) AnswerCallbackQuery(ctx context.Context, config domain.Telegra
 	return nil
 }
 
+func (s *Service) SetTelegramCommands(ctx context.Context, config domain.TelegramConfig, commands []TelegramBotCommand) error {
+	baseURL, client, err := s.telegramEndpoint(config)
+	if err != nil {
+		return err
+	}
+	encoded, err := json.Marshal(commands)
+	if err != nil {
+		return err
+	}
+	endpoint := baseURL + "/bot" + config.Token + "/setMyCommands"
+	form := url.Values{"commands": {string(encoded)}}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(form.Encode()))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("telegram HTTP %d: %s", resp.StatusCode, string(body))
+	}
+	return nil
+}
+
 func (s *Service) PollTelegramUpdates(ctx context.Context, config domain.TelegramConfig, offset int64) ([]TelegramUpdate, error) {
 	baseURL, client, err := s.telegramEndpoint(config)
 	if err != nil {
 		return nil, err
 	}
 	endpoint := baseURL + "/bot" + config.Token + "/getUpdates"
-	form := url.Values{"timeout": {"25"}, "allowed_updates": {`["message","callback_query"]`}}
+	form := url.Values{"timeout": {"10"}, "allowed_updates": {`["message","callback_query"]`}}
 	if offset > 0 {
 		form.Set("offset", strconv.FormatInt(offset, 10))
 	}
@@ -255,8 +326,9 @@ func (s *Service) PollTelegramUpdates(ctx context.Context, config domain.Telegra
 		Result []struct {
 			UpdateID int64 `json:"update_id"`
 			Message  struct {
-				Text string `json:"text"`
-				Chat struct {
+				MessageID int64  `json:"message_id"`
+				Text      string `json:"text"`
+				Chat      struct {
 					ID int64 `json:"id"`
 				} `json:"chat"`
 			} `json:"message"`
@@ -264,7 +336,8 @@ func (s *Service) PollTelegramUpdates(ctx context.Context, config domain.Telegra
 				ID      string `json:"id"`
 				Data    string `json:"data"`
 				Message struct {
-					Chat struct {
+					MessageID int64 `json:"message_id"`
+					Chat      struct {
 						ID int64 `json:"id"`
 					} `json:"chat"`
 				} `json:"message"`
@@ -283,11 +356,12 @@ func (s *Service) PollTelegramUpdates(ctx context.Context, config domain.Telegra
 			updates = append(updates, TelegramUpdate{
 				UpdateID:     item.UpdateID,
 				ChatID:       strconv.FormatInt(item.CallbackQuery.Message.Chat.ID, 10),
+				MessageID:    item.CallbackQuery.Message.MessageID,
 				CallbackID:   item.CallbackQuery.ID,
 				CallbackData: item.CallbackQuery.Data,
 			})
 		} else if item.Message.Chat.ID != 0 && strings.TrimSpace(item.Message.Text) != "" {
-			updates = append(updates, TelegramUpdate{UpdateID: item.UpdateID, ChatID: strconv.FormatInt(item.Message.Chat.ID, 10), Text: item.Message.Text})
+			updates = append(updates, TelegramUpdate{UpdateID: item.UpdateID, ChatID: strconv.FormatInt(item.Message.Chat.ID, 10), MessageID: item.Message.MessageID, Text: item.Message.Text})
 		}
 	}
 	return updates, nil
