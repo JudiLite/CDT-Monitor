@@ -640,7 +640,7 @@ func (e *Engine) buildDailyReport(ctx context.Context, config domain.Config, now
 		builder.WriteString(fmt.Sprintf("📦 实例：%s\n", appendStar(firstNonEmptyText(account.Remark, account.Account, strconv.FormatInt(account.ID, 10)))))
 		builder.WriteString(fmt.Sprintf("🌐 公网IP：%s\n", appendStar("未获取")))
 		builder.WriteString(fmt.Sprintf("📍 地域：%s\n", firstNonEmptyText(account.RegionName, account.Region)))
-		builder.WriteString(fmt.Sprintf("📈 今日流量：+%.2f GB\n", item.Today))
+		builder.WriteString(fmt.Sprintf("📈 昨日流量：+%.2f GB\n", item.Today))
 		builder.WriteString(fmt.Sprintf("🗂 已用：%.2f GB\n", account.FlowUsed))
 		builder.WriteString(fmt.Sprintf("📁 剩余：%.2f GB\n", remaining))
 		builder.WriteString(fmt.Sprintf("🔥 使用率：%.2f%% %s\n", account.Percentage, trafficHealthLabel(account)))
