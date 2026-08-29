@@ -592,12 +592,14 @@ func (e *Engine) buildDailyReport(ctx context.Context, config domain.Config, now
 		today := 0.0
 		if ok && account.FlowUsed >= previous {
 			today = account.FlowUsed - previous
+		} else if !ok {
+			today = account.FlowUsed
 		}
 		totalUsed += account.FlowUsed
 		totalLimit += account.FlowTotal
 		totalToday += today
-		name := firstNonEmptyText(account.Remark, account.Account, strconv.FormatInt(account.ID, 10))
-		fields[fmt.Sprintf("#%d %s", account.ID, name)] = fmt.Sprintf("今日 +%.2f GB / 累计 %.2f GB / 额度 %.2f GB / %.2f%% / %s", today, account.FlowUsed, account.FlowTotal, account.Percentage, account.InstanceStatus)
+		name := reportCardTitle(account)
+		fields[fmt.Sprintf("#%d %s", account.ID, name)] = fmt.Sprintf("今日 +%.2f GB / 已用 %.2f GB / 剩余 %.2f GB / %.2f%% / %s", today, account.FlowUsed, maxFloat(account.FlowTotal-account.FlowUsed, 0), account.Percentage, account.InstanceStatus)
 		rows = append(rows, reportRow{Account: account, Today: today})
 	}
 	percent := usagePercent(totalUsed, totalLimit)
@@ -608,8 +610,8 @@ func (e *Engine) buildDailyReport(ctx context.Context, config domain.Config, now
 	}
 	summary := fmt.Sprintf("%s CDT 流量日报：今日 +%.2f GB，累计 %.2f / %.2f GB。", now.Format("2006-01-02"), totalToday, totalUsed, totalLimit)
 	var builder strings.Builder
-	builder.WriteString("CDT 每日流量报告\n")
-	builder.WriteString("日期：")
+	builder.WriteString("📊 CDT 每日流量报告\n")
+	builder.WriteString("时间：")
 	builder.WriteString(now.Format("2006-01-02 15:04"))
 	builder.WriteString(" (")
 	builder.WriteString(config.Timezone)
@@ -627,20 +629,22 @@ func (e *Engine) buildDailyReport(ctx context.Context, config domain.Config, now
 	}
 	for index, item := range rows {
 		account := item.Account
-		name := firstNonEmptyText(account.Remark, account.Account, strconv.FormatInt(account.ID, 10))
+		name := reportCardTitle(account)
 		remaining := account.FlowTotal - account.FlowUsed
 		if remaining < 0 {
 			remaining = 0
 		}
 		builder.WriteString("\n")
-		builder.WriteString(fmt.Sprintf("#%d %s\n", account.ID, name))
-		builder.WriteString(fmt.Sprintf("实例：%s\n", account.Account))
-		builder.WriteString(fmt.Sprintf("区域：%s\n", firstNonEmptyText(account.RegionName, account.Region)))
-		builder.WriteString(fmt.Sprintf("今日：+%.2f GB\n", item.Today))
-		builder.WriteString(fmt.Sprintf("已用：%.2f GB\n", account.FlowUsed))
-		builder.WriteString(fmt.Sprintf("剩余：%.2f GB\n", remaining))
-		builder.WriteString(fmt.Sprintf("使用率：%.2f%% %s\n", account.Percentage, trafficHealthLabel(account)))
-		builder.WriteString(fmt.Sprintf("状态：%s", statusLabel(account.InstanceStatus)))
+		builder.WriteString(name)
+		builder.WriteString("\n")
+		builder.WriteString(fmt.Sprintf("📦 实例：%s\n", appendStar(firstNonEmptyText(account.Remark, account.Account, strconv.FormatInt(account.ID, 10)))))
+		builder.WriteString(fmt.Sprintf("🌐 公网IP：%s\n", appendStar("未获取")))
+		builder.WriteString(fmt.Sprintf("📍 地域：%s\n", firstNonEmptyText(account.RegionName, account.Region)))
+		builder.WriteString(fmt.Sprintf("📈 今日流量：+%.2f GB\n", item.Today))
+		builder.WriteString(fmt.Sprintf("🗂 已用：%.2f GB\n", account.FlowUsed))
+		builder.WriteString(fmt.Sprintf("📁 剩余：%.2f GB\n", remaining))
+		builder.WriteString(fmt.Sprintf("🔥 使用率：%.2f%% %s\n", account.Percentage, trafficHealthLabel(account)))
+		builder.WriteString(fmt.Sprintf("🕒 状态：%s", statusLabel(account.InstanceStatus)))
 		if index < len(rows)-1 {
 			builder.WriteString("\n")
 		}
@@ -1270,6 +1274,25 @@ func trafficHealthLabel(account domain.AccountSummary) string {
 		return "注意"
 	}
 	return "正常"
+}
+
+func reportCardTitle(account domain.AccountSummary) string {
+	return appendStar(firstNonEmptyText(account.Remark, account.Account, strconv.FormatInt(account.ID, 10)))
+}
+
+func appendStar(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" || strings.HasSuffix(value, "*") {
+		return value
+	}
+	return value + "*"
+}
+
+func maxFloat(a, b float64) float64 {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 func (e *Engine) enqueueTelegramControl(ctx context.Context, config domain.Config, args []string, action string) string {
