@@ -578,27 +578,29 @@ func (e *Engine) buildDailyReport(ctx context.Context, config domain.Config, now
 	}
 	fields := make(map[string]string, len(summaries)+4)
 	totalUsed, totalLimit, totalToday := 0.0, 0.0, 0.0
+	dayStart := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+	yesterdayStart := dayStart.AddDate(0, 0, -1)
 	type reportRow struct {
 		Account domain.AccountSummary
 		Today   float64
 	}
 	rows := make([]reportRow, 0, len(summaries))
 	for _, account := range summaries {
-		points, err := e.store.RecentDailyTraffic(ctx, account.ID, 2)
+		yesterdayEnd, ok, err := e.store.PreviousDailyTraffic(ctx, account.ID, dayStart)
 		if err != nil {
 			return "", nil, "", err
 		}
-		yesterday := account.FlowUsed
-		if len(points) >= 2 {
-			latest := points[0].Traffic
-			previous := points[1].Traffic
-			if latest >= previous {
-				yesterday = latest - previous
+		previousEnd, previousOK, err := e.store.PreviousDailyTraffic(ctx, account.ID, yesterdayStart)
+		if err != nil {
+			return "", nil, "", err
+		}
+		yesterday := 0.0
+		if ok && previousOK {
+			if yesterdayEnd >= previousEnd {
+				yesterday = yesterdayEnd - previousEnd
 			} else {
-				yesterday = latest
+				yesterday = yesterdayEnd
 			}
-		} else if len(points) == 1 {
-			yesterday = points[0].Traffic
 		}
 		totalUsed += account.FlowUsed
 		totalLimit += account.FlowTotal
