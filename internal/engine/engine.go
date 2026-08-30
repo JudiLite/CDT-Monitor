@@ -578,37 +578,42 @@ func (e *Engine) buildDailyReport(ctx context.Context, config domain.Config, now
 	}
 	fields := make(map[string]string, len(summaries)+4)
 	totalUsed, totalLimit, totalToday := 0.0, 0.0, 0.0
-	dayStart := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
 	type reportRow struct {
 		Account domain.AccountSummary
 		Today   float64
 	}
 	rows := make([]reportRow, 0, len(summaries))
 	for _, account := range summaries {
-		previous, ok, err := e.store.PreviousDailyTraffic(ctx, account.ID, dayStart)
+		points, err := e.store.RecentDailyTraffic(ctx, account.ID, 2)
 		if err != nil {
 			return "", nil, "", err
 		}
-		today := 0.0
-		if ok && account.FlowUsed >= previous {
-			today = account.FlowUsed - previous
-		} else if !ok {
-			today = account.FlowUsed
+		yesterday := account.FlowUsed
+		if len(points) >= 2 {
+			latest := points[0].Traffic
+			previous := points[1].Traffic
+			if latest >= previous {
+				yesterday = latest - previous
+			} else {
+				yesterday = latest
+			}
+		} else if len(points) == 1 {
+			yesterday = points[0].Traffic
 		}
 		totalUsed += account.FlowUsed
 		totalLimit += account.FlowTotal
-		totalToday += today
+		totalToday += yesterday
 		name := reportCardTitle(account)
-		fields[fmt.Sprintf("#%d %s", account.ID, name)] = fmt.Sprintf("今日 +%.2f GB / 已用 %.2f GB / 剩余 %.2f GB / %.2f%% / %s", today, account.FlowUsed, maxFloat(account.FlowTotal-account.FlowUsed, 0), account.Percentage, account.InstanceStatus)
-		rows = append(rows, reportRow{Account: account, Today: today})
+		fields[fmt.Sprintf("#%d %s", account.ID, name)] = fmt.Sprintf("昨日 +%.2f GB / 已用 %.2f GB / 剩余 %.2f GB / %.2f%% / %s", yesterday, account.FlowUsed, maxFloat(account.FlowTotal-account.FlowUsed, 0), account.Percentage, account.InstanceStatus)
+		rows = append(rows, reportRow{Account: account, Today: yesterday})
 	}
 	percent := usagePercent(totalUsed, totalLimit)
-	fields["今日总增量"] = fmt.Sprintf("%.2f GB", totalToday)
+	fields["昨日总增量"] = fmt.Sprintf("%.2f GB", totalToday)
 	fields["累计总流量"] = fmt.Sprintf("%.2f GB / %.2f GB (%.2f%%)", totalUsed, totalLimit, percent)
 	if !lastRun.IsZero() {
 		fields["最近同步"] = lastRun.In(now.Location()).Format("2006-01-02 15:04:05")
 	}
-	summary := fmt.Sprintf("%s CDT 流量日报：今日 +%.2f GB，累计 %.2f / %.2f GB。", now.Format("2006-01-02"), totalToday, totalUsed, totalLimit)
+	summary := fmt.Sprintf("%s CDT 流量日报：昨日 +%.2f GB，累计 %.2f / %.2f GB。", now.Format("2006-01-02"), totalToday, totalUsed, totalLimit)
 	var builder strings.Builder
 	builder.WriteString("📊 CDT 每日流量报告\n")
 	builder.WriteString("时间：")
@@ -616,7 +621,7 @@ func (e *Engine) buildDailyReport(ctx context.Context, config domain.Config, now
 	builder.WriteString(" (")
 	builder.WriteString(config.Timezone)
 	builder.WriteString(")\n\n")
-	builder.WriteString(fmt.Sprintf("今日总增量：+%.2f GB\n", totalToday))
+	builder.WriteString(fmt.Sprintf("昨日总增量：+%.2f GB\n", totalToday))
 	builder.WriteString(fmt.Sprintf("累计总流量：%.2f / %.2f GB (%.2f%%)\n", totalUsed, totalLimit, percent))
 	if !lastRun.IsZero() {
 		builder.WriteString("最近同步：")

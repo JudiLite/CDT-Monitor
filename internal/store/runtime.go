@@ -128,6 +128,28 @@ func (s *Store) PreviousDailyTraffic(ctx context.Context, accountID int64, befor
 	return traffic, true, nil
 }
 
+func (s *Store) RecentDailyTraffic(ctx context.Context, accountID int64, limit int) ([]domain.TrafficPoint, error) {
+	if limit < 1 {
+		limit = 2
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT traffic,recorded_at FROM traffic_daily WHERE account_id=? ORDER BY recorded_at DESC LIMIT ?`, accountID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	points := make([]domain.TrafficPoint, 0, limit)
+	for rows.Next() {
+		var point domain.TrafficPoint
+		var at int64
+		if err = rows.Scan(&point.Traffic, &at); err != nil {
+			return nil, err
+		}
+		point.At = time.Unix(at, 0).UTC()
+		points = append(points, point)
+	}
+	return points, rows.Err()
+}
+
 func (s *Store) LastMonitorRun(ctx context.Context) (time.Time, error) {
 	var value string
 	err := s.db.QueryRowContext(ctx, `SELECT value FROM settings WHERE key='last_monitor_run'`).Scan(&value)
